@@ -33,6 +33,8 @@ cd spotify-auto-liker
 
 ### 3. Создай приложение на Spotify Developer
 
+![man1](https://github.com/user-attachments/assets/3f5b60e1-bc33-4855-a6ab-35581aee0afc)
+
 - Перейди на https://developer.spotify.com/dashboard
 
 - Создай новое приложение
@@ -46,6 +48,8 @@ cd spotify-auto-liker
     - Client Secret
 
 - В настройках добавь Redirect URI скриншота (http://127.0.0.1:8888/callback)
+- 
+![man2](https://github.com/user-attachments/assets/fcf392da-198d-4ca9-ad8d-a6e24a2b3fbb)
 
 ---
 
