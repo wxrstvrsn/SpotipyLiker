@@ -53,13 +53,12 @@ cd spotify-auto-liker
 
 ---
 
-### 4. Вставь свои ключи в ```like_track.py```
+### 4. Вставь свои ключи в ```.env```
 
 ```commandline
 SPOTIPY_CLIENT_ID = 'ваш_CLIENT_ID'
 SPOTIPY_CLIENT_SECRET = 'ваш_CLIENT_SECRET'
 SPOTIPY_REDIRECT_URI = 'http://127.0.0.1:8888/callback'
-
 ```
 ---
 ### ✅ Первый запуск
