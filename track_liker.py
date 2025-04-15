@@ -14,6 +14,10 @@ def main():
 
     scope = 'user-read-playback-state user-library-modify'
 
+    token_dir = os.path.join(os.getenv('APPDATA'), 'SpotipyToken')
+    os.makedirs(token_dir, exist_ok=True)
+    cache_path = os.path.join(token_dir, 'token_cache.json')
+
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=SPOTIPY_CLIENT_ID,
         client_secret=SPOTIPY_CLIENT_SECRET,
@@ -26,7 +30,6 @@ def main():
     if current and current.get('item'):
         track = current['item']
         track_id = track['id']
-        track_name = track['name']
 
         sp.current_user_saved_tracks_add([track_id])
 
