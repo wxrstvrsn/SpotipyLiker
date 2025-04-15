@@ -76,7 +76,7 @@ python like_track.py
 
 ```commandline
 pip install pyinstaller
-pyinstaller --noconsole --onefile like_track.py
+pyinstaller --noconsole --onefile track_liker.py
 
 ```
 
