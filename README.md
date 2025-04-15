@@ -46,6 +46,8 @@ cd SpotipyLiker
     - Client Secret
 
 - В настройках добавь Redirect URI скриншота (http://127.0.0.1:8888/callback)
+![man1](https://github.com/user-attachments/assets/967f8b50-4cc1-47bc-a2ef-c70ef62c3620)
+![man2](https://github.com/user-attachments/assets/7726c79a-67c4-4f88-8848-14c95f483189)
 
 ---
 
@@ -85,10 +87,13 @@ pyinstaller --noconsole --onefile like_track.py
 
 - Правый клик → Свойства
 
-- В поле "Быстрая клавиша" укажите:
+- В поле "**Быстрый вызов**" укажите:
 
-```commandline
+ ```commandline
 Ctrl + Alt + L (либо кастом комбинацию)
 ```
+
+![Screenshot 2025-04-15 160843](https://github.com/user-attachments/assets/efc7e99a-2bcf-4fab-aaee-31c2423e29a3)
+
 ---
 # Gimme a Star if it helps <3
