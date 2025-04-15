@@ -25,8 +25,8 @@
 ### 1. Склонируй репозиторий
 
 ```
-git clone https://github.com/yourusername/spotify-auto-liker.git
-cd spotify-auto-liker
+git clone https://github.com/wxrstvrsn/SpotipyLiker.git
+cd SpotipyLiker
 ```
 
 ---
