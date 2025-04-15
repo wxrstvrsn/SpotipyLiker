@@ -63,7 +63,7 @@ SPOTIPY_REDIRECT_URI = 'http://127.0.0.1:8888/callback'
 ### ✅ Первый запуск
 
 ```commandline
-python like_track.py
+python track_liker.py
 ```
 
 - откроется окно браузера → авторизуйтесь
