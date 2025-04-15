@@ -51,7 +51,7 @@ cd SpotipyLiker
 
 ---
 
-### 4. Вставь свои ключи в ```like_track.py```
+### 4. Вставь свои ключи в ```track_liker.py```
 
 ```commandline
 SPOTIPY_CLIENT_ID = 'ваш_CLIENT_ID'
@@ -75,15 +75,15 @@ python like_track.py
 
 ```commandline
 pip install pyinstaller
-pyinstaller --noconsole --onefile like_track.py
+pyinstaller --noconsole --onefile track_liker.py
 
 ```
 
-- Файл появится в ```dist/like_track.exe```
+- Файл появится в ```dist/track_liker.exe```
 
 ## Добавление горячей клавиши (костыль но работает, все так делаю)
 
-- Создайте ярлык на ```like_track.exe```
+- Создайте ярлык на ```track_liker.exe```
 
 - Правый клик → Свойства
 
