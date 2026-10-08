@@ -12,7 +12,7 @@ import yt_dlp
 from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK
 from mutagen.mp3 import MP3
 
-from .spotify import Track
+from .spotify import Track, is_spotify_id
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +22,10 @@ MAX_ATTEMPTS_PER_SOURCE = 3
 MIN_SCORE = 0.5
 # Telegram не даёт превью-картинку больше 200 КБ
 MAX_THUMBNAIL_SIZE = 200 * 1024
+MAX_THUMBNAIL_SIDE = 320
+# Длительность неизвестна (импорт без длительности): длиннее — скорее всего микс или подкаст
+MAX_UNKNOWN_DURATION = 20 * 60
+OEMBED_URL = 'https://open.spotify.com/oembed'
 
 # Слова, которые означают другую версию трека. Если их нет в названии на Spotify,
 # а у кандидата они есть — скорее всего это ремикс/кавер/sped up и т.п.
@@ -93,6 +97,8 @@ def score_candidate(track: Track, candidate: Candidate) -> float | None:
         if diff > tolerance:
             return None
         duration_score = 1 - diff / tolerance
+    elif candidate.duration and candidate.duration > MAX_UNKNOWN_DURATION:
+        return None
     else:
         duration_score = 0.5
 
@@ -154,6 +160,22 @@ def _fetch_image(url: str | None) -> bytes | None:
         log.warning('Не удалось скачать обложку %s: %s', url, e)
         return None
     return response.content
+
+
+def _oembed_cover(track_id: str) -> tuple[str | None, str | None]:
+    """Обложка из публичного oEmbed Spotify (ключ API не нужен): (обложка, превью для Telegram)."""
+    try:
+        response = requests.get(
+            OEMBED_URL, params={'url': f'https://open.spotify.com/track/{track_id}'}, timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning('Не удалось получить обложку %s через oEmbed: %s', track_id, e)
+        return None, None
+    url = data.get('thumbnail_url') or None
+    width = data.get('thumbnail_width') or 0
+    return url, url if 0 < width <= MAX_THUMBNAIL_SIDE else None
 
 
 class _YtDlpLogger:
@@ -263,9 +285,13 @@ class Downloader:
         raise TrackNotFoundError(track.display_name)
 
     def _finalize(self, track: Track, candidate: Candidate, path: Path) -> DownloadResult:
-        cover = _fetch_image(track.cover_url)
+        cover_url, thumb_url = track.cover_url, track.thumb_url
+        if not cover_url and is_spotify_id(track.id):
+            # В выгрузках (/import) обложек обычно нет
+            cover_url, thumb_url = _oembed_cover(track.id)
+        cover = _fetch_image(cover_url)
         tag_mp3(path, track, cover)
-        thumbnail = cover if track.thumb_url == track.cover_url else _fetch_image(track.thumb_url)
+        thumbnail = cover if thumb_url == cover_url else _fetch_image(thumb_url)
         if thumbnail and len(thumbnail) > MAX_THUMBNAIL_SIZE:
             thumbnail = None
         return DownloadResult(

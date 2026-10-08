@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -11,6 +12,11 @@ log = logging.getLogger(__name__)
 SCOPE = 'user-library-read'
 # Максимальный limit для GET /me/tracks
 API_PAGE_LIMIT = 50
+_SPOTIFY_ID_RE = re.compile(r'[A-Za-z0-9]{22}')
+
+
+def is_spotify_id(track_id: str) -> bool:
+    return bool(_SPOTIFY_ID_RE.fullmatch(track_id))
 
 
 class NotAuthorizedError(Exception):

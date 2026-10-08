@@ -1,6 +1,7 @@
 """Сквозные тесты обработчиков: апдейты прогоняются через Dispatcher, Telegram API подменён."""
 
 import asyncio
+import dataclasses
 import itertools
 from datetime import datetime
 from pathlib import Path
@@ -13,10 +14,11 @@ from aiogram.methods import (
     AnswerCallbackQuery,
     DeleteMessage,
     EditMessageText,
+    GetFile,
     SendAudio,
     SendMessage,
 )
-from aiogram.types import Audio, CallbackQuery, Chat, Message, Update, User
+from aiogram.types import Audio, CallbackQuery, Chat, Document, File, Message, Update, User
 
 from bot.__main__ import build_dispatcher
 from bot.config import Settings
@@ -36,9 +38,12 @@ class FakeSession(BaseSession):
     def __init__(self):
         super().__init__()
         self.requests = []
+        self.file_content = b''
 
     async def make_request(self, bot, method, timeout=None):
         self.requests.append(method)
+        if isinstance(method, GetFile):
+            return File(file_id=method.file_id, file_unique_id='f', file_path='documents/file')
         if isinstance(method, (SendMessage, EditMessageText, SendAudio)):
             message = Message(
                 message_id=next(_ids),
@@ -52,7 +57,7 @@ class FakeSession(BaseSession):
         return True
 
     async def stream_content(self, *args, **kwargs):
-        yield b''
+        yield self.file_content
 
     async def close(self):
         pass
@@ -122,23 +127,39 @@ def settings(tmp_path):
     )
 
 
-@pytest.fixture
-def env(tmp_path, settings):
+def _make_env(tmp_path, settings, spotify):
     storage = Storage(tmp_path / 'db.sqlite3')
-    spotify = FakeSpotify(TRACKS)
     downloader = FakeDownloader(tmp_path)
     sender = TrackSender(downloader, storage, settings.max_concurrent_downloads)
     session = FakeSession()
     bot = Bot('42:TEST', session=session, default=DefaultBotProperties(parse_mode='HTML'))
     dp = build_dispatcher(settings, spotify, storage, sender)
-    env = type('Env', (), dict(storage=storage, spotify=spotify, downloader=downloader, sender=sender,
-                               session=session, bot=bot, dp=dp, tmp_path=tmp_path))
-    yield env
+    return type('Env', (), dict(storage=storage, spotify=spotify, downloader=downloader, sender=sender,
+                                session=session, bot=bot, dp=dp, tmp_path=tmp_path))
+
+
+def _close_env(env):
     # роутер модульный: отвязываем его, чтобы следующий тест мог собрать новый Dispatcher
-    dp.sub_routers.clear()
+    env.dp.sub_routers.clear()
     from bot.handlers import router
     router._parent_router = None
-    storage.close()
+    env.storage.close()
+
+
+@pytest.fixture
+def env(tmp_path, settings):
+    env = _make_env(tmp_path, settings, FakeSpotify(TRACKS))
+    yield env
+    _close_env(env)
+
+
+@pytest.fixture
+def env_no_api(tmp_path, settings):
+    """Бот без ключей Spotify: только импорт выгрузок."""
+    settings = dataclasses.replace(settings, spotify_client_id=None, spotify_client_secret=None)
+    env = _make_env(tmp_path, settings, None)
+    yield env
+    _close_env(env)
 
 
 def user(user_id=USER_ID):
@@ -149,6 +170,14 @@ def message_update(text, user_id=USER_ID):
     return Update(update_id=next(_ids), message=Message(
         message_id=next(_ids), date=datetime.now(), chat=Chat(id=user_id, type='private'),
         from_user=user(user_id), text=text,
+    ))
+
+
+def document_update(filename, size, user_id=USER_ID, caption=None):
+    return Update(update_id=next(_ids), message=Message(
+        message_id=next(_ids), date=datetime.now(), chat=Chat(id=user_id, type='private'),
+        from_user=user(user_id), caption=caption,
+        document=Document(file_id=f'doc{next(_ids)}', file_unique_id='d', file_name=filename, file_size=size),
     ))
 
 
@@ -299,3 +328,107 @@ async def test_access_denied_for_other_users(env):
     (answer,) = env.session.of(AnswerCallbackQuery)
     assert answer.show_alert
     assert not env.downloader.calls
+
+
+# --- Импорт выгрузки (режим без Spotify API) ---
+
+LIKED_CSV = """Track URI,Track Name,Artist Name(s),Album Name,Track Duration (ms),Added At
+spotify:track:0DiWol3AO6WpXZgp0goxAV,One More Time,Daft Punk,Discovery,320357,2021-01-05T10:00:00Z
+spotify:track:69kOkLUCkxIZYexIgSG8rq,Get Lucky,"Daft Punk,Pharrell Williams",Random Access Memories,369626,2023-07-01T08:30:00Z
+spotify:track:2KH16WveTQWT6KOG9Rg6e2,Harder Better Faster Stronger,Daft Punk,Discovery,224693,2022-03-03T00:00:00Z
+""".encode()
+
+
+async def upload(env, data, filename='liked.csv', caption=None):
+    env.session.file_content = data
+    await feed(env, document_update(filename, len(data), caption=caption))
+
+
+async def test_no_api_requires_import(env_no_api):
+    env = env_no_api
+    await feed(env, message_update('/tracks'))
+    text = env.session.of(SendMessage)[-1].text
+    assert '/import' in text and '/login' not in text
+
+    await feed(env, message_update('/login'))
+    assert 'Ключи Spotify API не заданы' in env.session.of(SendMessage)[-1].text
+
+    await feed(env, message_update('/import'))
+    assert 'exportify.app' in env.session.of(SendMessage)[-1].text
+
+
+async def test_import_then_browse_download_and_forget(env_no_api):
+    env = env_no_api
+    await upload(env, LIKED_CSV)
+
+    assert env.session.of(GetFile)
+    reply = env.session.of(SendMessage)[-1].text
+    assert 'Загружено треков: 3' in reply
+    assert 'по дате добавления' in reply
+
+    await feed(env, message_update('/tracks'))
+    sent = env.session.of(SendMessage)[-1]
+    assert 'Любимые треки</b>: 3' in sent.text
+    buttons = [row[0].text for row in sent.reply_markup.inline_keyboard[:-1]]
+    assert buttons == [
+        'Daft Punk, Pharrell Williams — Get Lucky',
+        'Daft Punk — Harder Better Faster Stronger',
+        'Daft Punk — One More Time',
+    ]
+
+    track_button = sent.reply_markup.inline_keyboard[0][0]
+    await feed(env, callback_update(track_button.callback_data))
+    assert env.downloader.calls == ['69kOkLUCkxIZYexIgSG8rq']
+    assert env.session.of(SendAudio)[-1].title == 'Get Lucky'
+
+    env.session.requests.clear()
+    await feed(env, message_update('/last 2'))
+    # Get Lucky уже отправлялся — уходит по сохранённому file_id
+    assert [a.title or a.audio for a in env.session.of(SendAudio)] == ['Harder Better Faster Stronger', 'FILE-Get Lucky']
+
+    await feed(env, message_update('/forget'))
+    assert 'Выгрузка удалена' in env.session.of(SendMessage)[-1].text
+    await feed(env, message_update('/tracks'))
+    assert '/import' in env.session.of(SendMessage)[-1].text
+
+
+async def test_new_import_replaces_previous(env_no_api):
+    env = env_no_api
+    await upload(env, LIKED_CSV)
+    await upload(env, b'Track Name,Artist Name(s)\nSolo,Someone\n', filename='other.csv')
+    assert 'нет дат добавления' in env.session.of(SendMessage)[-1].text
+    assert env.storage.library_size(USER_ID) == 1
+
+
+async def test_import_with_command_caption(env_no_api):
+    await upload(env_no_api, LIKED_CSV, caption='/import')
+    assert 'Загружено треков: 3' in env_no_api.session.of(SendMessage)[-1].text
+
+
+async def test_bad_and_too_large_files(env_no_api):
+    env = env_no_api
+    await upload(env, b'just some text', filename='notes.txt')
+    assert 'не нашёл колонок' in env.session.of(SendMessage)[-1].text
+    assert env.storage.library_size(USER_ID) == 0
+
+    env.session.requests.clear()
+    await feed(env, document_update('huge.zip', 30 * 1024 * 1024))
+    assert 'больше 20 МБ' in env.session.of(SendMessage)[-1].text
+    assert not env.session.of(GetFile)
+
+
+async def test_import_takes_priority_over_spotify_until_login(env):
+    await upload(env, LIKED_CSV)
+    await feed(env, message_update('/tracks'))
+    assert 'Любимые треки</b>: 3' in env.session.of(SendMessage)[-1].text
+
+    await feed(env, message_update('/help'))
+    assert 'загруженная выгрузка: 3' in env.session.of(SendMessage)[-1].text
+
+    await feed(env, message_update('/login'))
+    state = env.session.of(SendMessage)[-1].reply_markup.inline_keyboard[0][0].url.split('state=')[1]
+    await feed(env, message_update(f'http://127.0.0.1:8888/callback?code=abc&state={state}'))
+    assert 'выгрузка удалена' in env.session.of(SendMessage)[-1].text
+
+    await feed(env, message_update('/tracks'))
+    assert 'Любимые треки</b>: 25' in env.session.of(SendMessage)[-1].text

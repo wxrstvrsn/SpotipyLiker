@@ -102,9 +102,16 @@ Ctrl + Alt + L (либо кастом комбинацию)
 
 # 🤖 Telegram-бот: любимые треки → mp3
 
-Бот берёт ваши «Любимые треки» из Spotify через [Spotipy](https://spotipy.readthedocs.io/), находит каждый трек
-на SoundCloud с помощью [yt-dlp](https://github.com/yt-dlp/yt-dlp), скачивает его в mp3 и прописывает теги
-из Spotify: название, исполнители, альбом, исполнитель альбома, номер трека, год и обложка.
+Бот берёт ваши «Любимые треки» из Spotify, находит каждый трек на SoundCloud с помощью
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), скачивает его в mp3 и прописывает теги из Spotify:
+название, исполнители, альбом, исполнитель альбома, номер трека, год и обложка.
+
+Список треков бот получает одним из двух способов:
+
+- **без ключей Spotify API** — вы присылаете боту выгрузку библиотеки: CSV из [Exportify](https://exportify.app)
+  или `YourLibrary.json` из официальной выгрузки данных Spotify (см. [Режим без Spotify API](#режим-без-spotify-api));
+- **через Spotify API** ([Spotipy](https://spotipy.readthedocs.io/)) — нужны свои ключи приложения Spotify,
+  зато список всегда актуален.
 
 ## Что умеет
 
@@ -112,8 +119,30 @@ Ctrl + Alt + L (либо кастом комбинацию)
   Нажали на трек — бот скачивает его и присылает в диалог.
 - `/last N` — скачать **N последних добавленных** треков (без числа — `LAST_TRACKS_DEFAULT`, по умолчанию 10).
   Треки приходят от старых к новым, в конце — сводка, что не удалось найти.
+- `/import` — как загрузить выгрузку библиотеки; сам файл просто отправьте боту. `/forget` — удалить выгрузку.
 - `/login`, `/logout` — подключить/отключить свой аккаунт Spotify (у каждого пользователя бота свой токен).
+  Доступны, только если заданы ключи Spotify API.
 - Повторная отправка трека мгновенная: бот запоминает `file_id` уже загруженного в Telegram файла.
+
+## Режим без Spotify API
+
+Ключи `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` можно не задавать — тогда не нужны ни приложение
+на developer.spotify.com, ни Premium. Библиотеку бот берёт из файла, который вы ему присылаете:
+
+| Источник | Как получить | Что внутри |
+|---|---|---|
+| **CSV из Exportify** (рекомендую) | [exportify.app](https://exportify.app) → войти через Spotify → у «Liked Songs» нажать Export | название, исполнители, альбом, длительность, дата релиза, обложка, **дата добавления** |
+| **Выгрузка данных Spotify** | [spotify.com/account/privacy](https://www.spotify.com/account/privacy/) → «Скачать данные» → данные аккаунта; архив приходит на почту, обычно за несколько дней | название, исполнитель, альбом, ссылка на трек |
+
+- Можно прислать весь zip-архив выгрузки Spotify — бот сам найдёт в нём `YourLibrary.json`.
+  Также подойдёт CSV из похожих сервисов (TuneMyMusic, Soundiiz), если в нём есть колонки с названием и исполнителем.
+- Новая выгрузка заменяет предыдущую. Выгрузка — это снимок: после новых лайков пришлите файл заново.
+- Если в файле есть даты добавления (Exportify), `/last N` берёт самые свежие треки; если нет — первые N по порядку в файле.
+- В выгрузке Spotify нет длительности, поэтому трек на SoundCloud подбирается только по названию и исполнителю —
+  совпадения чуть менее точные. Обложку бот в этом случае берёт из публичного
+  [oEmbed](https://developer.spotify.com/documentation/embeds/reference/oembed) Spotify (ключ не нужен).
+- Если заданы и ключи API, и загружена выгрузка — используется выгрузка. Удалить её — `/forget`;
+  успешный `/login` тоже удаляет выгрузку и переключает бота на Spotify API.
 
 ## Как бот ищет трек
 
@@ -134,7 +163,9 @@ Ctrl + Alt + L (либо кастом комбинацию)
 
 Напиши [@BotFather](https://t.me/BotFather) → `/newbot` → получи токен.
 
-### 2. Настрой приложение Spotify
+### 2. Настрой приложение Spotify (необязательно)
+
+Пропусти этот шаг, если будешь пользоваться ботом [без Spotify API](#режим-без-spotify-api).
 
 Как в разделе выше: https://developer.spotify.com/dashboard → приложение → `Client ID`, `Client Secret`,
 Redirect URI `http://127.0.0.1:8888/callback`.
@@ -149,7 +180,7 @@ Redirect URI `http://127.0.0.1:8888/callback`.
 cp .env.example .env
 ```
 
-Обязательные переменные: `TELEGRAM_BOT_TOKEN`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`.
+Обязательна только `TELEGRAM_BOT_TOKEN`. `SPOTIFY_CLIENT_ID` и `SPOTIFY_CLIENT_SECRET` — если нужен вход через Spotify API.
 Советую задать и `ALLOWED_USER_IDS` — иначе бот будет скачивать треки для любого, кто его найдёт.
 Остальные настройки описаны в [`.env.example`](.env.example).
 
@@ -166,7 +197,11 @@ python -m bot
 docker compose up -d --build
 ```
 
-### 5. Подключи Spotify в чате с ботом
+### 5. Подключи библиотеку в чате с ботом
+
+**Без API:** отправь боту CSV из Exportify или выгрузку Spotify (zip или `YourLibrary.json`). Подсказка — `/import`.
+
+**Через Spotify API:**
 
 1. Отправь боту `/login` и нажми кнопку «Войти через Spotify».
 2. Разреши доступ. Spotify перенаправит на `http://127.0.0.1:8888/callback?code=...` —
@@ -191,9 +226,11 @@ bot/
 ├── __main__.py     # запуск: python -m bot
 ├── config.py       # настройки из .env
 ├── spotify.py      # OAuth для каждого пользователя, любимые треки (Spotipy)
+├── importer.py     # разбор выгрузок: CSV (Exportify и др.), YourLibrary.json, zip
+├── library.py      # откуда брать треки: выгрузка или Spotify API
 ├── downloader.py   # поиск на SoundCloud, выбор совпадения, mp3 + теги (yt-dlp, mutagen)
 ├── sender.py       # отправка в Telegram, кэш file_id, защита от параллельных загрузок
-├── storage.py      # SQLite: метаданные треков для кнопок и file_id
+├── storage.py      # SQLite: метаданные треков, file_id, импортированные библиотеки
 ├── keyboards.py    # кнопки: 10 треков на страницу + навигация
 ├── handlers.py     # команды и нажатия кнопок (aiogram 3)
 └── middlewares.py  # доступ только для ALLOWED_USER_IDS

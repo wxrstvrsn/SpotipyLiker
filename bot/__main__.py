@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 
 from .config import ConfigError, Settings
 from .downloader import Downloader
-from .handlers import COMMANDS, router
+from .handlers import bot_commands, router
+from .library import Library
 from .middlewares import AccessMiddleware
 from .sender import TrackSender
 from .spotify import SpotifyService
@@ -20,9 +21,17 @@ from .storage import Storage
 log = logging.getLogger('bot')
 
 
-def build_dispatcher(settings: Settings, spotify: SpotifyService, storage: Storage, sender: TrackSender) -> Dispatcher:
+def build_dispatcher(
+    settings: Settings, spotify: SpotifyService | None, storage: Storage, sender: TrackSender
+) -> Dispatcher:
     # `storage` в aiogram зарезервирован под FSM, поэтому кэш передаётся как `db`
-    dp = Dispatcher(settings=settings, spotify=spotify, db=storage, sender=sender)
+    dp = Dispatcher(
+        settings=settings,
+        spotify=spotify,
+        db=storage,
+        library=Library(spotify, storage),
+        sender=sender,
+    )
     access = AccessMiddleware(settings.allowed_user_ids)
     dp.message.outer_middleware(access)
     dp.callback_query.outer_middleware(access)
@@ -38,12 +47,14 @@ async def run(settings: Settings) -> None:
             leftover.unlink()
 
     storage = Storage(settings.db_path)
-    spotify = SpotifyService(
-        settings.spotify_client_id,
-        settings.spotify_client_secret,
-        settings.spotify_redirect_uri,
-        settings.tokens_dir,
-    )
+    spotify = None
+    if settings.spotify_enabled:
+        spotify = SpotifyService(
+            settings.spotify_client_id,
+            settings.spotify_client_secret,
+            settings.spotify_redirect_uri,
+            settings.tokens_dir,
+        )
     downloader = Downloader(settings.download_dir, settings.search_sources, settings.audio_quality)
     sender = TrackSender(downloader, storage, settings.max_concurrent_downloads)
 
@@ -51,10 +62,15 @@ async def run(settings: Settings) -> None:
     dp = build_dispatcher(settings, spotify, storage, sender)
 
     try:
-        await bot.set_my_commands(COMMANDS)
-        log.info('Бот запущен, источники: %s', ', '.join(settings.search_sources))
+        await bot.set_my_commands(bot_commands(settings.spotify_enabled))
+        log.info(
+            'Бот запущен. Библиотека: %s; поиск: %s',
+            'Spotify API + /import' if spotify else 'только /import (ключи Spotify не заданы)',
+            ', '.join(settings.search_sources),
+        )
         await dp.start_polling(bot)
     finally:
+        await bot.session.close()
         storage.close()
 
 
