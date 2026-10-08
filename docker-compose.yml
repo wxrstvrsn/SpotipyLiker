@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      # перекрывает DATA_DIR из .env, чтобы данные лежали в volume
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
