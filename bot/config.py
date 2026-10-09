@@ -30,7 +30,7 @@ def _int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def _user_ids(raw: str) -> frozenset[int]:
+def _user_ids(raw: str, name: str = 'ALLOWED_USER_IDS') -> frozenset[int]:
     ids = set()
     for part in raw.replace(';', ',').split(','):
         part = part.strip()
@@ -39,7 +39,7 @@ def _user_ids(raw: str) -> frozenset[int]:
         try:
             ids.add(int(part))
         except ValueError:
-            raise ConfigError(f'ALLOWED_USER_IDS: некорректный id {part!r}') from None
+            raise ConfigError(f'{name}: некорректный id {part!r}') from None
     return frozenset(ids)
 
 
@@ -56,16 +56,23 @@ def _sources(raw: str) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
-    spotify_client_id: str
-    spotify_client_secret: str
+    # Без ключей Spotify бот работает только с импортированными выгрузками (/import)
+    spotify_client_id: str | None
+    spotify_client_secret: str | None
     spotify_redirect_uri: str
     allowed_user_ids: frozenset[int]
+    # Админы: всегда имеют доступ, управляют пользователями и настройками через /admin
+    admin_user_ids: frozenset[int]
     data_dir: Path
     last_tracks_default: int
     last_tracks_max: int
     search_sources: tuple[str, ...]
     audio_quality: int
     max_concurrent_downloads: int
+
+    @property
+    def spotify_enabled(self) -> bool:
+        return bool(self.spotify_client_id and self.spotify_client_secret)
 
     @property
     def tokens_dir(self) -> Path:
@@ -82,12 +89,17 @@ class Settings:
     @classmethod
     def from_env(cls) -> 'Settings':
         last_max = _int('LAST_TRACKS_MAX', 50)
+        client_id = os.getenv('SPOTIFY_CLIENT_ID', '').strip() or None
+        client_secret = os.getenv('SPOTIFY_CLIENT_SECRET', '').strip() or None
+        if bool(client_id) != bool(client_secret):
+            raise ConfigError('Задайте оба ключа SPOTIFY_CLIENT_ID и SPOTIFY_CLIENT_SECRET или ни одного')
         return cls(
             bot_token=_require('TELEGRAM_BOT_TOKEN'),
-            spotify_client_id=_require('SPOTIFY_CLIENT_ID'),
-            spotify_client_secret=_require('SPOTIFY_CLIENT_SECRET'),
+            spotify_client_id=client_id,
+            spotify_client_secret=client_secret,
             spotify_redirect_uri=os.getenv('SPOTIFY_REDIRECT_URI', '').strip() or DEFAULT_REDIRECT_URI,
             allowed_user_ids=_user_ids(os.getenv('ALLOWED_USER_IDS', '')),
+            admin_user_ids=_user_ids(os.getenv('ADMIN_USER_IDS', ''), 'ADMIN_USER_IDS'),
             data_dir=Path(os.getenv('DATA_DIR', '').strip() or 'data').resolve(),
             last_tracks_default=min(_int('LAST_TRACKS_DEFAULT', 10), last_max),
             last_tracks_max=last_max,

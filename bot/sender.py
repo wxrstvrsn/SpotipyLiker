@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, FSInputFile, Message
 
 from .downloader import Downloader
+from .runtime import RuntimeSettings
 from .spotify import Track
 from .storage import Storage
 
@@ -33,15 +34,18 @@ def audio_filename(track: Track) -> str:
 class TrackSender:
     """Доставляет трек в чат: по сохранённому file_id или скачав и загрузив mp3."""
 
-    def __init__(self, downloader: Downloader, storage: Storage, max_concurrent_downloads: int):
+    def __init__(
+        self, downloader: Downloader, storage: Storage, max_concurrent_downloads: int, runtime: RuntimeSettings
+    ):
         self._downloader = downloader
         self._storage = storage
+        self._runtime = runtime
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads)
         # Один трек не скачивается параллельно: второй запрос дождётся первого и возьмёт file_id
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def is_cached(self, track_id: str) -> bool:
-        return self._storage.get_file_id(track_id) is not None
+        return self._storage.get_file_id(track_id, self._runtime.audio_quality) is not None
 
     def _lock(self, track_id: str) -> asyncio.Lock:
         lock = self._locks.get(track_id)
@@ -53,25 +57,28 @@ class TrackSender:
     async def send(self, bot: Bot, chat_id: int, track: Track) -> Message:
         lock = self._lock(track.id)
         async with lock:
-            file_id = self._storage.get_file_id(track.id)
+            # Кэш file_id отдельный для каждого битрейта: после смены качества в /admin
+            # трек перекачается в новом качестве
+            quality = self._runtime.audio_quality
+            file_id = self._storage.get_file_id(track.id, quality)
             if file_id:
                 try:
                     return await self._send_audio(bot, chat_id, audio=file_id)
                 except TelegramBadRequest as e:
                     log.warning('file_id для %s не подошёл (%s), скачиваю заново', track.id, e)
-                    self._storage.delete_file_id(track.id)
+                    self._storage.delete_file_id(track.id, quality)
 
             async with self._semaphore:
-                result = await asyncio.to_thread(self._downloader.download, track)
+                result = await asyncio.to_thread(self._downloader.download, track, quality)
             try:
                 if result.path.stat().st_size > TELEGRAM_UPLOAD_LIMIT:
                     raise TrackTooLargeError(track.display_name)
                 message = await self._send_audio(
                     bot,
                     chat_id,
-                    audio=FSInputFile(result.path, filename=audio_filename(track)),
-                    title=track.title,
-                    performer=track.artist,
+                    audio=FSInputFile(result.path, filename=audio_filename(result.track)),
+                    title=result.track.title,
+                    performer=result.track.artist,
                     duration=result.duration,
                     thumbnail=BufferedInputFile(result.thumbnail, 'cover.jpg') if result.thumbnail else None,
                     request_timeout=UPLOAD_TIMEOUT,
@@ -81,7 +88,7 @@ class TrackSender:
 
             media = message.audio or message.document
             if media:
-                self._storage.set_file_id(track.id, media.file_id)
+                self._storage.set_file_id(track.id, quality, media.file_id)
             return message
 
     @staticmethod

@@ -1,5 +1,6 @@
 """Поиск трека по метаданным Spotify на SoundCloud (через yt-dlp), скачивание в mp3 и тегирование."""
 
+import dataclasses
 import logging
 import re
 import unicodedata
@@ -12,7 +13,8 @@ import yt_dlp
 from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK
 from mutagen.mp3 import MP3
 
-from .spotify import Track
+from .query import split_artist_title
+from .spotify import Track, is_spotify_id
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,10 @@ MAX_ATTEMPTS_PER_SOURCE = 3
 MIN_SCORE = 0.5
 # Telegram не даёт превью-картинку больше 200 КБ
 MAX_THUMBNAIL_SIZE = 200 * 1024
+MAX_THUMBNAIL_SIDE = 320
+# Длительность неизвестна (импорт без длительности): длиннее — скорее всего микс или подкаст
+MAX_UNKNOWN_DURATION = 20 * 60
+OEMBED_URL = 'https://open.spotify.com/oembed'
 
 # Слова, которые означают другую версию трека. Если их нет в названии на Spotify,
 # а у кандидата они есть — скорее всего это ремикс/кавер/sped up и т.п.
@@ -58,6 +64,8 @@ class DownloadResult:
     duration: int
     source_url: str
     thumbnail: bytes | None
+    # Метаданные, записанные в теги: для запроса без исполнителя — из найденного трека
+    track: Track
 
 
 def clean_title(title: str) -> str:
@@ -81,7 +89,8 @@ def _coverage(needle: list[str], haystack: set[str]) -> float:
 
 
 def build_query(track: Track) -> str:
-    return f'{track.artists[0]} {clean_title(track.title)}'
+    title = clean_title(track.title)
+    return f'{track.artists[0]} {title}' if track.artists else title
 
 
 def score_candidate(track: Track, candidate: Candidate) -> float | None:
@@ -93,6 +102,8 @@ def score_candidate(track: Track, candidate: Candidate) -> float | None:
         if diff > tolerance:
             return None
         duration_score = 1 - diff / tolerance
+    elif candidate.duration and candidate.duration > MAX_UNKNOWN_DURATION:
+        return None
     else:
         duration_score = 0.5
 
@@ -105,7 +116,10 @@ def score_candidate(track: Track, candidate: Candidate) -> float | None:
     )
     if title_score < 0.5:
         return None
-    artist_score = max(_coverage(tokens(artist), cand_set) for artist in track.artists)
+    if track.artists:
+        artist_score = max(_coverage(tokens(artist), cand_set) for artist in track.artists)
+    else:
+        artist_score = 0.5
 
     spotify_tokens = set(tokens(' '.join((track.title, track.album, *track.artists))))
     extra_markers = (set(tokens(candidate.title)) & VERSION_MARKERS) - spotify_tokens
@@ -154,6 +168,22 @@ def _fetch_image(url: str | None) -> bytes | None:
         log.warning('Не удалось скачать обложку %s: %s', url, e)
         return None
     return response.content
+
+
+def _oembed_cover(track_id: str) -> tuple[str | None, str | None]:
+    """Обложка из публичного oEmbed Spotify (ключ API не нужен): (обложка, превью для Telegram)."""
+    try:
+        response = requests.get(
+            OEMBED_URL, params={'url': f'https://open.spotify.com/track/{track_id}'}, timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning('Не удалось получить обложку %s через oEmbed: %s', track_id, e)
+        return None, None
+    url = data.get('thumbnail_url') or None
+    width = data.get('thumbnail_width') or 0
+    return url, url if 0 < width <= MAX_THUMBNAIL_SIDE else None
 
 
 class _YtDlpLogger:
@@ -208,7 +238,7 @@ class Downloader:
             ))
         return candidates
 
-    def _download_candidate(self, track: Track, candidate: Candidate) -> Path:
+    def _download_candidate(self, track: Track, candidate: Candidate, quality: int) -> Path:
         opts = {
             **self._base_opts(),
             # SoundCloud отдаёт для Go+ треков только 30-секундное превью — такие форматы пропускаем
@@ -218,7 +248,7 @@ class Downloader:
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': str(self._quality),
+                'preferredquality': str(quality),
             }],
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -232,7 +262,8 @@ class Downloader:
         for leftover in self._dir.glob(f'{track.id}.*'):
             leftover.unlink(missing_ok=True)
 
-    def download(self, track: Track) -> DownloadResult:
+    def download(self, track: Track, quality: int | None = None) -> DownloadResult:
+        quality = quality or self._quality
         query = build_query(track)
         search_errors = []
         for source in self._sources:
@@ -247,7 +278,7 @@ class Downloader:
             for candidate in candidates[:MAX_ATTEMPTS_PER_SOURCE]:
                 log.info('Скачиваю %s -> %s', track.display_name, candidate.url)
                 try:
-                    path = self._download_candidate(track, candidate)
+                    path = self._download_candidate(track, candidate, quality)
                 except yt_dlp.utils.DownloadError as e:
                     log.warning('Не удалось скачать %s: %s', candidate.url, e)
                     self._cleanup(track)
@@ -262,10 +293,24 @@ class Downloader:
             raise search_errors[-1]
         raise TrackNotFoundError(track.display_name)
 
+    @staticmethod
+    def _resolve_metadata(track: Track, candidate: Candidate) -> Track:
+        if track.artists:
+            return track
+        # Текстовый запрос без исполнителя: берём «Исполнитель - Название» из найденного трека
+        split = split_artist_title(candidate.title)
+        artist, title = split if split else (candidate.uploader or 'Unknown', candidate.title)
+        return dataclasses.replace(track, title=title, artists=(artist,))
+
     def _finalize(self, track: Track, candidate: Candidate, path: Path) -> DownloadResult:
-        cover = _fetch_image(track.cover_url)
+        track = self._resolve_metadata(track, candidate)
+        cover_url, thumb_url = track.cover_url, track.thumb_url
+        if not cover_url and is_spotify_id(track.id):
+            # В выгрузках (/import) обложек обычно нет
+            cover_url, thumb_url = _oembed_cover(track.id)
+        cover = _fetch_image(cover_url)
         tag_mp3(path, track, cover)
-        thumbnail = cover if track.thumb_url == track.cover_url else _fetch_image(track.thumb_url)
+        thumbnail = cover if thumb_url == cover_url else _fetch_image(thumb_url)
         if thumbnail and len(thumbnail) > MAX_THUMBNAIL_SIZE:
             thumbnail = None
         return DownloadResult(
@@ -273,4 +318,5 @@ class Downloader:
             duration=round(MP3(path).info.length),
             source_url=candidate.url,
             thumbnail=thumbnail,
+            track=track,
         )

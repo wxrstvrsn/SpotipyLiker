@@ -8,6 +8,7 @@ from mutagen.mp3 import MP3
 
 from bot import downloader as dl
 from bot.downloader import Candidate, Downloader, TrackNotFoundError, build_query, clean_title, rank_candidates
+from bot.query import track_from_query
 
 from .conftest import make_track, requires_ffmpeg, write_mp3
 
@@ -180,3 +181,80 @@ def test_all_sources_unavailable_is_an_error_not_not_found(tmp_path, track, fake
     with patch.object(FakeYoutubeDL, 'extract_info', side_effect=yt_dlp.utils.DownloadError('network')):
         with pytest.raises(yt_dlp.utils.DownloadError):
             Downloader(tmp_path, ('soundcloud',), 192).download(track)
+
+
+def test_unknown_duration_rejects_long_mixes():
+    track = make_track(duration_ms=0)
+    song = cand('Daft Punk - Get Lucky', 'Daft Punk', 250.0)
+    mix = cand('Daft Punk - Get Lucky', 'Daft Punk', 3600.0)
+    assert rank_candidates(track, [mix, song]) == [song]
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.data
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize('width, expect_thumbnail', [(300, True), (640, False)])
+def test_imported_track_gets_cover_from_oembed(tmp_path, fake_ytdl, monkeypatch, width, expect_thumbnail):
+    track = make_track(cover_url=None, thumb_url=None)
+    calls = []
+
+    def fake_get(url, params, timeout):
+        calls.append(params['url'])
+        return FakeResponse({'thumbnail_url': 'https://i.scdn.co/image/oembed', 'thumbnail_width': width})
+
+    monkeypatch.setattr(dl.requests, 'get', fake_get)
+    fake_ytdl.entries['scsearch8'] = [entry('Daft Punk - Get Lucky', 'Daft Punk', 369.0, 'https://sc/1')]
+
+    result = Downloader(tmp_path, ('soundcloud',), 192).download(track)
+
+    assert calls == [f'https://open.spotify.com/track/{track.id}']
+    assert ID3(result.path).getall('APIC')[0].data == b'jpeg:https://i.scdn.co/image/oembed'
+    assert (result.thumbnail is not None) == expect_thumbnail
+
+
+@requires_ffmpeg
+def test_synthetic_id_skips_oembed(tmp_path, fake_ytdl, monkeypatch):
+    monkeypatch.setattr(dl.requests, 'get', lambda *a, **k: pytest.fail('oEmbed не нужен'))
+    fake_ytdl.entries['scsearch8'] = [entry('Daft Punk - Get Lucky', 'Daft Punk', 369.0, 'https://sc/1')]
+    track = make_track(id='_' + 'a' * 21, cover_url=None, thumb_url=None)
+    result = Downloader(tmp_path, ('soundcloud',), 192).download(track)
+    assert result.thumbnail is None
+    assert not ID3(result.path).getall('APIC')
+
+
+def test_build_query_without_artist():
+    assert build_query(track_from_query('daft punk get lucky (feat. pharrell)')) == 'daft punk get lucky'
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize('cand_title, uploader, artist, title', [
+    ('Daft Punk - Get Lucky', 'random uploader', 'Daft Punk', 'Get Lucky'),
+    ('Get Lucky', 'Daft Punk', 'Daft Punk', 'Get Lucky'),
+])
+def test_free_text_query_takes_tags_from_found_track(tmp_path, fake_ytdl, cand_title, uploader, artist, title):
+    track = track_from_query('daft punk get lucky')
+    fake_ytdl.entries['scsearch8'] = [entry(cand_title, uploader, 369.0, 'https://sc/1')]
+
+    result = Downloader(tmp_path, ('soundcloud',), 192).download(track)
+
+    assert (result.track.artists, result.track.title) == ((artist,), title)
+    assert result.track.id == track.id
+    tags = ID3(result.path)
+    assert (str(tags['TPE1']), str(tags['TIT2'])) == (artist, title)
+
+
+def test_free_text_query_ranking():
+    track = track_from_query('daft punk get lucky')
+    best = cand('Get Lucky', 'Daft Punk', 369.0)
+    other = cand('Get Lucky', 'random guy', 369.0)
+    cover = cand('Get Lucky (cover)', 'someone', 369.0)
+    assert rank_candidates(track, [cover, other, best])[0] == best

@@ -13,17 +13,37 @@ def test_storage_tracks_and_file_ids(tmp_path, track):
     assert storage.get_track(track.id) == track
     assert storage.get_track('missing') is None
 
-    assert storage.get_file_id(track.id) is None
-    storage.set_file_id(track.id, 'FILE')
-    assert storage.get_file_id(track.id) == 'FILE'
-    storage.delete_file_id(track.id)
-    assert storage.get_file_id(track.id) is None
+    assert storage.get_file_id(track.id, 192) is None
+    storage.set_file_id(track.id, 192, 'FILE')
+    assert storage.get_file_id(track.id, 192) == 'FILE'
+    assert storage.get_file_id(track.id, 320) is None  # кэш свой для каждого битрейта
+    storage.delete_file_id(track.id, 192)
+    assert storage.get_file_id(track.id, 192) is None
     storage.close()
 
     # данные переживают перезапуск
     reopened = Storage(tmp_path / 'db.sqlite3')
     assert reopened.get_track(track.id) == track
     reopened.close()
+
+
+def test_imported_library(tmp_path):
+    storage = Storage(tmp_path / 'db.sqlite3')
+    tracks = [make_track(id=f'id{i:020d}', title=f'Song {i}') for i in range(25)]
+    storage.replace_library(1, tracks)
+    storage.replace_library(2, tracks[:3])
+
+    assert storage.library_size(1) == 25
+    assert storage.library_page(1, 10, 20) == tracks[20:]
+    assert storage.get_track(tracks[5].id) == tracks[5]
+
+    storage.replace_library(1, tracks[:2])  # новая выгрузка заменяет старую
+    assert storage.library_page(1, 10, 0) == tracks[:2]
+
+    storage.clear_library(1)
+    assert storage.library_size(1) == 0
+    assert storage.library_size(2) == 3
+    storage.close()
 
 
 @pytest.mark.parametrize('total, pages', [(0, 1), (1, 1), (10, 1), (11, 2), (95, 10)])
@@ -75,8 +95,18 @@ def test_settings_from_env(monkeypatch, tmp_path):
     assert settings.tokens_dir == tmp_path / 'tokens'
 
 
+def test_settings_without_spotify_keys(monkeypatch):
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', '1:abc')
+    monkeypatch.delenv('SPOTIFY_CLIENT_ID', raising=False)
+    monkeypatch.delenv('SPOTIFY_CLIENT_SECRET', raising=False)
+    settings = Settings.from_env()
+    assert not settings.spotify_enabled
+    assert settings.spotify_client_id is None
+
+
 @pytest.mark.parametrize('name, value', [
     ('TELEGRAM_BOT_TOKEN', ''),
+    ('SPOTIFY_CLIENT_SECRET', ''),
     ('SEARCH_SOURCES', 'spotify'),
     ('ALLOWED_USER_IDS', 'me'),
     ('AUDIO_QUALITY', 'high'),
