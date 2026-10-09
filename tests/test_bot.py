@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import itertools
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -107,6 +108,10 @@ class FakeSpotify:
     def latest_tracks(self, user_id, count):
         self._check()
         return self.tracks[:count]
+
+    def random_tracks(self, user_id, count):
+        self._check()
+        return random.sample(self.tracks, min(count, len(self.tracks)))
 
     def authorize_url(self, user_id, state):
         return f'https://accounts.spotify.com/authorize?state={state}'
@@ -737,3 +742,37 @@ async def test_settings_request_without_admins(tmp_path, settings):
         assert env.runtime.audio_quality == 192
     finally:
         _close_env(env)
+
+
+
+# --- /shuffle ---
+
+async def test_shuffle_sends_random_distinct_tracks(env):
+    await feed(env, message_update('/shuffle 3'))
+    titles = [a.title for a in env.session.of(SendAudio)]
+    assert len(titles) == 3 and len(set(titles)) == 3
+    assert set(titles) <= {t.title for t in TRACKS}
+    assert 'Готово: 3 из 3' in texts(env)[-1]
+
+
+async def test_shuffle_default_count_and_validation(env):
+    await feed(env, message_update('/shuffle'))
+    assert len(env.session.of(SendAudio)) == 5  # LAST_TRACKS_DEFAULT в тестовых настройках
+
+    env.session.requests.clear()
+    await feed(env, message_update('/shuffle abc'))
+    assert '/shuffle 10' in texts(env)[-1]
+    await feed(env, message_update('/shuffle 500'))
+    assert 'от 1 до 50' in texts(env)[-1]
+    assert not env.session.of(SendAudio)
+
+
+async def test_shuffle_from_imported_library(env_no_api):
+    env = env_no_api
+    await feed(env, message_update('/shuffle'))
+    assert '/import' in texts(env)[-1]
+
+    await upload(env, LIKED_CSV)
+    await feed(env, message_update('/shuffle 10'))
+    titles = {a.title for a in env.session.of(SendAudio)}
+    assert titles == {'One More Time', 'Get Lucky', 'Harder Better Faster Stronger'}

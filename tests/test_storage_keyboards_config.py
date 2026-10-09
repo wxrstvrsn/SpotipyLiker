@@ -40,6 +40,9 @@ def test_imported_library(tmp_path):
     storage.replace_library(1, tracks[:2])  # новая выгрузка заменяет старую
     assert storage.library_page(1, 10, 0) == tracks[:2]
 
+    assert storage.library_tracks_at(2, [2, 0, 99]) == [tracks[2], tracks[0]]
+    assert storage.library_tracks_at(2, []) == []
+
     storage.clear_library(1)
     assert storage.library_size(1) == 0
     assert storage.library_size(2) == 3

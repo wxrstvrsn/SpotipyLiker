@@ -164,6 +164,21 @@ class Storage:
     def library_size(self, user_id: int) -> int:
         return self._conn.execute('SELECT COUNT(*) FROM library WHERE user_id = ?', (user_id,)).fetchone()[0]
 
+    def library_tracks_at(self, user_id: int, positions: list[int]) -> list[Track]:
+        """Треки выгрузки на заданных позициях, в том же порядке."""
+        if not positions:
+            return []
+        placeholders = ', '.join('?' * len(positions))
+        rows = self._conn.execute(
+            f'''
+            SELECT l.position, t.data FROM library l JOIN tracks t ON t.id = l.track_id
+            WHERE l.user_id = ? AND l.position IN ({placeholders})
+            ''',
+            (user_id, *positions),
+        ).fetchall()
+        by_position = {position: Track.from_dict(json.loads(data)) for position, data in rows}
+        return [by_position[p] for p in positions if p in by_position]
+
     def library_page(self, user_id: int, limit: int, offset: int) -> list[Track]:
         rows = self._conn.execute(
             '''

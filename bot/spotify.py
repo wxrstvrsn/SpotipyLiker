@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -184,3 +185,20 @@ class SpotifyService:
             if not items or not page.get('next'):
                 break
         return tracks[:count]
+
+    def random_tracks(self, user_id: int, count: int) -> list[Track]:
+        """count случайных треков из «Любимых», без повторов."""
+        client = self._client(user_id)
+        total = int(client.current_user_saved_tracks(limit=1, offset=0).get('total') or 0)
+        pages: dict[int, list[dict]] = {}
+        tracks: list[Track] = []
+        for offset in random.sample(range(total), min(count, total)):
+            # Запрашиваем страницами по 50, чтобы не делать запрос на каждый трек
+            start = offset - offset % API_PAGE_LIMIT
+            if start not in pages:
+                page = client.current_user_saved_tracks(limit=API_PAGE_LIMIT, offset=start)
+                pages[start] = page.get('items') or []
+            items = pages[start]
+            if offset - start < len(items):
+                tracks.extend(_parse_saved_items([items[offset - start]]))
+        return tracks

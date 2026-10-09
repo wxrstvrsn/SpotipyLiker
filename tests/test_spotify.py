@@ -132,3 +132,23 @@ def test_complete_authorization_exchanges_code(service, monkeypatch):
 
 def test_make_track_helper_is_valid():
     assert make_track().artist == 'Daft Punk, Pharrell Williams, Nile Rodgers'
+
+
+def test_random_tracks_are_distinct_and_fetched_by_pages(service, monkeypatch):
+    client = FakeClient([saved_item(i) for i in range(120)])
+    monkeypatch.setattr(service, '_client', lambda user_id: client)
+
+    tracks = service.random_tracks(1, 10)
+
+    ids = [t.id for t in tracks]
+    assert len(ids) == 10 and len(set(ids)) == 10
+    assert set(ids) <= {f'id{i}' for i in range(120)}
+    # 1 запрос за количеством + не больше 3 страниц по 50
+    assert len(client.calls) <= 4
+    assert all(offset % 50 == 0 for _, offset in client.calls[1:])
+
+
+def test_random_tracks_small_library(service, monkeypatch):
+    client = FakeClient([saved_item(i) for i in range(7)])
+    monkeypatch.setattr(service, '_client', lambda user_id: client)
+    assert sorted(t.id for t in service.random_tracks(1, 50)) == sorted(f'id{i}' for i in range(7))

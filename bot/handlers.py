@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+from collections.abc import Awaitable, Callable
 from html import escape
 
 import requests
@@ -48,6 +49,7 @@ def bot_commands(spotify_enabled: bool) -> list[BotCommand]:
     commands = [
         BotCommand(command='tracks', description='Любимые треки (по 10 на страницу)'),
         BotCommand(command='last', description='Скачать N последних добавленных треков'),
+        BotCommand(command='shuffle', description='Скачать N случайных треков'),
         BotCommand(command='import', description='Загрузить выгрузку библиотеки без Spotify API'),
         BotCommand(command='forget', description='Удалить загруженную выгрузку'),
         BotCommand(command='settings', description='Качество mp3 (смена — через админа)'),
@@ -127,6 +129,8 @@ def _help_text(settings: Settings, status: str, is_admin: bool) -> str:
         '/tracks — листать любимые треки, нажмите на трек, чтобы получить его\n'
         f'/last [N] — скачать N последних добавленных треков '
         f'(по умолчанию {settings.last_tracks_default}, максимум {settings.last_tracks_max})\n'
+        '/shuffle [N] — скачать N случайных треков из библиотеки (так же, по умолчанию '
+        f'{settings.last_tracks_default})\n'
         '/import — загрузить выгрузку библиотеки (работает без Spotify API)\n'
         '/forget — удалить загруженную выгрузку\n'
         '/settings — качество mp3 (изменение одобряет администратор)\n'
@@ -337,21 +341,23 @@ async def on_track(
     await _deliver_one(bot, sender, callback.from_user.id, track)
 
 
-@router.message(Command('last'))
-async def cmd_last(
+async def _batch_command(
     message: Message,
     command: CommandObject,
     bot: Bot,
     settings: Settings,
     library: Library,
     sender: TrackSender,
+    fetch: Callable[[int, int], Awaitable[list[Track]]],
+    title: Callable[[int], str],
 ) -> None:
+    """Общая часть /last и /shuffle: «/команда [N]», по умолчанию LAST_TRACKS_DEFAULT треков."""
     count = settings.last_tracks_default
     if command.args:
         try:
             count = int(command.args.split()[0])
         except ValueError:
-            await message.answer('Использование: <code>/last 10</code>')
+            await message.answer(f'Использование: <code>/{command.command} 10</code>')
             return
         if not 1 <= count <= settings.last_tracks_max:
             await message.answer(f'Количество должно быть от 1 до {settings.last_tracks_max}.')
@@ -364,19 +370,42 @@ async def cmd_last(
     _active_batches.add(user_id)
     try:
         try:
-            tracks = await library.latest(user_id, count)
+            tracks = await fetch(user_id, count)
         except LIBRARY_ERRORS as e:
             await message.answer(_library_error_text(e, library))
             return
         if not tracks:
             await message.answer('В «Любимых треках» пока пусто.')
             return
-        # От старых к новым: самый свежий трек окажется внизу переписки
-        await _deliver_many(
-            message, bot, sender, list(reversed(tracks)), f'⏳ Скачиваю {len(tracks)} последних треков…'
-        )
+        await _deliver_many(message, bot, sender, tracks, title(len(tracks)))
     finally:
         _active_batches.discard(user_id)
+
+
+@router.message(Command('last'))
+async def cmd_last(
+    message: Message, command: CommandObject, bot: Bot, settings: Settings, library: Library, sender: TrackSender
+) -> None:
+    async def oldest_first(user_id: int, count: int) -> list[Track]:
+        # От старых к новым: самый свежий трек окажется внизу переписки
+        return list(reversed(await library.latest(user_id, count)))
+
+    await _batch_command(
+        message, command, bot, settings, library, sender,
+        fetch=oldest_first,
+        title=lambda n: f'⏳ Скачиваю {n} последних треков…',
+    )
+
+
+@router.message(Command('shuffle'))
+async def cmd_shuffle(
+    message: Message, command: CommandObject, bot: Bot, settings: Settings, library: Library, sender: TrackSender
+) -> None:
+    await _batch_command(
+        message, command, bot, settings, library, sender,
+        fetch=library.random_tracks,
+        title=lambda n: f'🎲 Скачиваю {n} случайных треков…',
+    )
 
 
 # --- Импорт выгрузки (режим без Spotify API) ---

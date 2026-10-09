@@ -1,4 +1,5 @@
 import asyncio
+import random
 
 from .spotify import NotAuthorizedError, SpotifyService, Track
 from .storage import Storage
@@ -43,6 +44,19 @@ class Library:
             raise NoLibraryError from None
         self._db.save_tracks(tracks)
         return tracks, total
+
+    async def random_tracks(self, user_id: int, count: int) -> list[Track]:
+        """count случайных треков без повторов."""
+        total = self._db.library_size(user_id)
+        if total:
+            return self._db.library_tracks_at(user_id, random.sample(range(total), min(count, total)))
+        spotify = self._require_spotify()
+        try:
+            tracks = await asyncio.to_thread(spotify.random_tracks, user_id, count)
+        except NotAuthorizedError:
+            raise NoLibraryError from None
+        self._db.save_tracks(tracks)
+        return tracks
 
     async def latest(self, user_id: int, count: int) -> list[Track]:
         if self._db.library_size(user_id):
