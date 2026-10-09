@@ -69,9 +69,9 @@ class TrackSender:
                 message = await self._send_audio(
                     bot,
                     chat_id,
-                    audio=FSInputFile(result.path, filename=audio_filename(track)),
-                    title=track.title,
-                    performer=track.artist,
+                    audio=FSInputFile(result.path, filename=audio_filename(result.track)),
+                    title=result.track.title,
+                    performer=result.track.artist,
                     duration=result.duration,
                     thumbnail=BufferedInputFile(result.thumbnail, 'cover.jpg') if result.thumbnail else None,
                     request_timeout=UPLOAD_TIMEOUT,

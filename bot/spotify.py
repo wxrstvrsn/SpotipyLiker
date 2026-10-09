@@ -47,7 +47,8 @@ class Track:
 
     @property
     def display_name(self) -> str:
-        return f'{self.artist} — {self.title}'
+        # У трека из текстового запроса без «Исполнитель - » исполнителя нет
+        return f'{self.artist} — {self.title}' if self.artists else self.title
 
     @classmethod
     def from_api(cls, data: dict) -> 'Track':

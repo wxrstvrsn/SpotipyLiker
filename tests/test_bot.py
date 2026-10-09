@@ -24,6 +24,7 @@ from bot.__main__ import build_dispatcher
 from bot.config import Settings
 from bot.downloader import DownloadResult, TrackNotFoundError
 from bot.keyboards import PageCallback, TrackCallback
+from bot.query import track_from_query
 from bot.sender import TrackSender
 from bot.spotify import NotAuthorizedError
 from bot.storage import Storage
@@ -103,15 +104,17 @@ class FakeDownloader:
         self.tmp_path = tmp_path
         self.missing = set(missing)
         self.calls = []
+        self.tracks = []
 
     def download(self, track):
         self.calls.append(track.id)
+        self.tracks.append(track)
         if track.id in self.missing:
             raise TrackNotFoundError(track.display_name)
         path = self.tmp_path / f'{track.id}.mp3'
         path.write_bytes(b'ID3 fake mp3')
         return DownloadResult(path=path, duration=track.duration_ms // 1000,
-                              source_url='https://sc/x', thumbnail=b'jpeg')
+                              source_url='https://sc/x', thumbnail=b'jpeg', track=track)
 
 
 TRACKS = [make_track(id=f'track{i:02d}', title=f'Song {i}') for i in range(25)]
@@ -432,3 +435,47 @@ async def test_import_takes_priority_over_spotify_until_login(env):
 
     await feed(env, message_update('/tracks'))
     assert 'Любимые треки</b>: 25' in env.session.of(SendMessage)[-1].text
+
+
+# --- Поиск по тексту ---
+
+async def test_text_query_sends_track(env_no_api):
+    env = env_no_api
+    await feed(env, message_update('Daft Punk - Get Lucky'))
+
+    (track,) = env.downloader.tracks
+    assert (track.artists, track.title, track.duration_ms) == (('Daft Punk',), 'Get Lucky', 0)
+    (audio,) = env.session.of(SendAudio)
+    assert (audio.title, audio.performer) == ('Get Lucky', 'Daft Punk')
+    # статус «Ищу и скачиваю» удалён после отправки
+    assert 'Daft Punk — Get Lucky' in env.session.of(SendMessage)[0].text
+    assert env.session.of(DeleteMessage)
+
+    # повторный запрос — из кэша, без скачивания
+    await feed(env, message_update('Daft Punk - Get Lucky'))
+    assert len(env.downloader.calls) == 1
+    assert env.session.of(SendAudio)[-1].audio == 'FILE-Get Lucky'
+
+
+async def test_text_query_several_lines(env):
+    await feed(env, message_update('Daft Punk - One More Time\n\nКороль и Шут — Кукла колдуна'))
+    assert [t.title for t in env.downloader.tracks] == ['One More Time', 'Кукла колдуна']
+    assert len(env.session.of(SendAudio)) == 2
+    assert 'Готово: 2 из 2' in env.session.of(SendMessage)[-1].text
+
+
+async def test_text_query_not_found(env_no_api):
+    env = env_no_api
+    env.downloader.missing = {track_from_query('nothing here').id}
+    await feed(env, message_update('nothing here'))
+    assert not env.session.of(SendAudio)
+    assert 'не нашёл подходящий трек' in env.session.of(EditMessageText)[-1].text
+
+
+async def test_links_and_unknown_commands_are_not_searched(env_no_api):
+    env = env_no_api
+    await feed(env, message_update('https://open.spotify.com/track/0DiWol3AO6WpXZgp0goxAV'))
+    assert 'Ссылки я не открываю' in env.session.of(SendMessage)[-1].text
+    await feed(env, message_update('/whatever'))
+    assert 'Не понял' in env.session.of(SendMessage)[-1].text
+    assert not env.downloader.calls

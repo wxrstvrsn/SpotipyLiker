@@ -8,6 +8,7 @@ from mutagen.mp3 import MP3
 
 from bot import downloader as dl
 from bot.downloader import Candidate, Downloader, TrackNotFoundError, build_query, clean_title, rank_candidates
+from bot.query import track_from_query
 
 from .conftest import make_track, requires_ffmpeg, write_mp3
 
@@ -228,3 +229,32 @@ def test_synthetic_id_skips_oembed(tmp_path, fake_ytdl, monkeypatch):
     result = Downloader(tmp_path, ('soundcloud',), 192).download(track)
     assert result.thumbnail is None
     assert not ID3(result.path).getall('APIC')
+
+
+def test_build_query_without_artist():
+    assert build_query(track_from_query('daft punk get lucky (feat. pharrell)')) == 'daft punk get lucky'
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize('cand_title, uploader, artist, title', [
+    ('Daft Punk - Get Lucky', 'random uploader', 'Daft Punk', 'Get Lucky'),
+    ('Get Lucky', 'Daft Punk', 'Daft Punk', 'Get Lucky'),
+])
+def test_free_text_query_takes_tags_from_found_track(tmp_path, fake_ytdl, cand_title, uploader, artist, title):
+    track = track_from_query('daft punk get lucky')
+    fake_ytdl.entries['scsearch8'] = [entry(cand_title, uploader, 369.0, 'https://sc/1')]
+
+    result = Downloader(tmp_path, ('soundcloud',), 192).download(track)
+
+    assert (result.track.artists, result.track.title) == ((artist,), title)
+    assert result.track.id == track.id
+    tags = ID3(result.path)
+    assert (str(tags['TPE1']), str(tags['TIT2'])) == (artist, title)
+
+
+def test_free_text_query_ranking():
+    track = track_from_query('daft punk get lucky')
+    best = cand('Get Lucky', 'Daft Punk', 369.0)
+    other = cand('Get Lucky', 'random guy', 369.0)
+    cover = cand('Get Lucky (cover)', 'someone', 369.0)
+    assert rank_candidates(track, [cover, other, best])[0] == best

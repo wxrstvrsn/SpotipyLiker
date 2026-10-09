@@ -24,6 +24,7 @@ from .downloader import TrackNotFoundError
 from .importer import ImportFormatError, parse_library_file
 from .keyboards import PAGE_SIZE, PageCallback, TrackCallback, total_pages, tracks_keyboard
 from .library import Library, NoLibraryError
+from .query import track_from_query
 from .sender import TrackSender, TrackTooLargeError
 from .spotify import AuthorizationError, SpotifyService, Track
 from .storage import Storage
@@ -118,6 +119,8 @@ def _help_text(settings: Settings, status: str) -> str:
         '/import — загрузить выгрузку библиотеки (работает без Spotify API)\n'
         '/forget — удалить загруженную выгрузку\n'
         f'{login}\n'
+        '🔎 Или просто напишите <code>Исполнитель - Название</code> — найду и пришлю трек. '
+        'Можно несколько строк, по треку на строку.\n\n'
         f'{status}'
     )
 
@@ -265,17 +268,8 @@ async def _send_track(bot: Bot, sender: TrackSender, chat_id: int, track: Track)
         await sender.send(bot, chat_id, track)
 
 
-@router.callback_query(TrackCallback.filter())
-async def on_track(
-    callback: CallbackQuery, callback_data: TrackCallback, bot: Bot, sender: TrackSender, db: Storage
-) -> None:
-    track = db.get_track(callback_data.track_id)
-    if track is None:
-        await callback.answer('Трек не найден, откройте список заново: /tracks', show_alert=True)
-        return
-    await callback.answer(f'⏳ {track.display_name}'[:200])
-
-    chat_id = callback.from_user.id
+async def _deliver_one(bot: Bot, sender: TrackSender, chat_id: int, track: Track) -> None:
+    """Один трек со статусом «Ищу и скачиваю…» и сообщением об ошибке."""
     status = None
     if not sender.is_cached(track.id):
         status = await bot.send_message(chat_id, f'🔎 Ищу и скачиваю: <b>{escape(track.display_name)}</b>…')
@@ -293,6 +287,42 @@ async def on_track(
     if status:
         with contextlib.suppress(TelegramBadRequest):
             await status.delete()
+
+
+async def _deliver_many(message: Message, bot: Bot, sender: TrackSender, tracks: list[Track], title: str) -> None:
+    """Треки по очереди, с прогрессом в одном сообщении и сводкой в конце."""
+    progress = await message.answer(title)
+    failed: list[str] = []
+    for index, track in enumerate(tracks, 1):
+        with contextlib.suppress(TelegramBadRequest):
+            await progress.edit_text(f'⏳ {index}/{len(tracks)}: <b>{escape(track.display_name)}</b>')
+        try:
+            await _send_track(bot, sender, message.chat.id, track)
+        except Exception as e:
+            if not isinstance(e, (TrackNotFoundError, TrackTooLargeError)):
+                log.exception('Не удалось отправить %s', track.display_name)
+            failed.append(f'• {escape(track.display_name)} — {_failure_text(e)}')
+
+    with contextlib.suppress(TelegramBadRequest):
+        await progress.delete()
+    summary = f'✅ Готово: {len(tracks) - len(failed)} из {len(tracks)}.'
+    if failed:
+        summary += '\n\nНе получилось:\n' + '\n'.join(failed)
+    if len(summary) > MAX_MESSAGE_LENGTH:
+        summary = summary[: MAX_MESSAGE_LENGTH - 1].rsplit('\n', 1)[0] + '\n…'
+    await message.answer(summary)
+
+
+@router.callback_query(TrackCallback.filter())
+async def on_track(
+    callback: CallbackQuery, callback_data: TrackCallback, bot: Bot, sender: TrackSender, db: Storage
+) -> None:
+    track = db.get_track(callback_data.track_id)
+    if track is None:
+        await callback.answer('Трек не найден, откройте список заново: /tracks', show_alert=True)
+        return
+    await callback.answer(f'⏳ {track.display_name}'[:200])
+    await _deliver_one(bot, sender, callback.from_user.id, track)
 
 
 @router.message(Command('last'))
@@ -329,30 +359,10 @@ async def cmd_last(
         if not tracks:
             await message.answer('В «Любимых треках» пока пусто.')
             return
-
-        progress = await message.answer(f'⏳ Скачиваю {len(tracks)} последних треков…')
-        failed: list[str] = []
         # От старых к новым: самый свежий трек окажется внизу переписки
-        for index, track in enumerate(reversed(tracks), 1):
-            with contextlib.suppress(TelegramBadRequest):
-                await progress.edit_text(
-                    f'⏳ {index}/{len(tracks)}: <b>{escape(track.display_name)}</b>'
-                )
-            try:
-                await _send_track(bot, sender, message.chat.id, track)
-            except Exception as e:
-                if not isinstance(e, (TrackNotFoundError, TrackTooLargeError)):
-                    log.exception('Не удалось отправить %s', track.display_name)
-                failed.append(f'• {escape(track.display_name)} — {_failure_text(e)}')
-
-        with contextlib.suppress(TelegramBadRequest):
-            await progress.delete()
-        summary = f'✅ Готово: {len(tracks) - len(failed)} из {len(tracks)}.'
-        if failed:
-            summary += '\n\nНе получилось:\n' + '\n'.join(failed)
-        if len(summary) > MAX_MESSAGE_LENGTH:
-            summary = summary[: MAX_MESSAGE_LENGTH - 1].rsplit('\n', 1)[0] + '\n…'
-        await message.answer(summary)
+        await _deliver_many(
+            message, bot, sender, list(reversed(tracks)), f'⏳ Скачиваю {len(tracks)} последних треков…'
+        )
     finally:
         _active_batches.discard(user_id)
 
@@ -414,6 +424,35 @@ async def cmd_forget(message: Message, db: Storage, library: Library) -> None:
         'Загрузить новую: /import'
     )
     await message.answer(f'🗑 Выгрузка удалена. {next_step}')
+
+
+# --- Поиск по тексту: «Исполнитель - Название» ---
+
+@router.message(F.text, ~F.text.startswith('/'))
+async def on_text_query(message: Message, bot: Bot, settings: Settings, sender: TrackSender) -> None:
+    lines = [line.strip() for line in message.text.splitlines() if line.strip()]
+    if any(line.lower().startswith(('http://', 'https://')) for line in lines):
+        await message.answer('Ссылки я не открываю. Напишите <code>Исполнитель - Название</code>.')
+        return
+    tracks = [track for track in map(track_from_query, lines) if track]
+    if not tracks:
+        return
+    if len(tracks) > settings.last_tracks_max:
+        await message.answer(f'За раз — не больше {settings.last_tracks_max} треков.')
+        return
+    if len(tracks) == 1:
+        await _deliver_one(bot, sender, message.chat.id, tracks[0])
+        return
+
+    user_id = message.from_user.id
+    if user_id in _active_batches:
+        await message.answer('⏳ Предыдущая подборка ещё скачивается, дождитесь её окончания.')
+        return
+    _active_batches.add(user_id)
+    try:
+        await _deliver_many(message, bot, sender, tracks, f'⏳ Ищу {len(tracks)} треков…')
+    finally:
+        _active_batches.discard(user_id)
 
 
 @router.message()

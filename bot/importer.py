@@ -53,7 +53,7 @@ class _Row:
     added_at: datetime | None
 
 
-def _track_id(uri: str, artists: tuple[str, ...], title: str, album: str) -> str:
+def make_track_id(uri: str, artists: tuple[str, ...], title: str, album: str) -> str:
     uri = (uri or '').strip()
     match = _SPOTIFY_ID_RE.search(uri)
     if match:
@@ -118,7 +118,7 @@ def _make_row(
         return None
     album = str(album or '').strip()
     track = Track(
-        id=_track_id(uri, artists, title, album),
+        id=make_track_id(uri, artists, title, album),
         title=title,
         artists=artists,
         album=album,

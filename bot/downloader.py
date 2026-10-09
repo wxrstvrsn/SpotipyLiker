@@ -1,5 +1,6 @@
 """Поиск трека по метаданным Spotify на SoundCloud (через yt-dlp), скачивание в mp3 и тегирование."""
 
+import dataclasses
 import logging
 import re
 import unicodedata
@@ -12,6 +13,7 @@ import yt_dlp
 from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK
 from mutagen.mp3 import MP3
 
+from .query import split_artist_title
 from .spotify import Track, is_spotify_id
 
 log = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ class DownloadResult:
     duration: int
     source_url: str
     thumbnail: bytes | None
+    # Метаданные, записанные в теги: для запроса без исполнителя — из найденного трека
+    track: Track
 
 
 def clean_title(title: str) -> str:
@@ -85,7 +89,8 @@ def _coverage(needle: list[str], haystack: set[str]) -> float:
 
 
 def build_query(track: Track) -> str:
-    return f'{track.artists[0]} {clean_title(track.title)}'
+    title = clean_title(track.title)
+    return f'{track.artists[0]} {title}' if track.artists else title
 
 
 def score_candidate(track: Track, candidate: Candidate) -> float | None:
@@ -111,7 +116,10 @@ def score_candidate(track: Track, candidate: Candidate) -> float | None:
     )
     if title_score < 0.5:
         return None
-    artist_score = max(_coverage(tokens(artist), cand_set) for artist in track.artists)
+    if track.artists:
+        artist_score = max(_coverage(tokens(artist), cand_set) for artist in track.artists)
+    else:
+        artist_score = 0.5
 
     spotify_tokens = set(tokens(' '.join((track.title, track.album, *track.artists))))
     extra_markers = (set(tokens(candidate.title)) & VERSION_MARKERS) - spotify_tokens
@@ -284,7 +292,17 @@ class Downloader:
             raise search_errors[-1]
         raise TrackNotFoundError(track.display_name)
 
+    @staticmethod
+    def _resolve_metadata(track: Track, candidate: Candidate) -> Track:
+        if track.artists:
+            return track
+        # Текстовый запрос без исполнителя: берём «Исполнитель - Название» из найденного трека
+        split = split_artist_title(candidate.title)
+        artist, title = split if split else (candidate.uploader or 'Unknown', candidate.title)
+        return dataclasses.replace(track, title=title, artists=(artist,))
+
     def _finalize(self, track: Track, candidate: Candidate, path: Path) -> DownloadResult:
+        track = self._resolve_metadata(track, candidate)
         cover_url, thumb_url = track.cover_url, track.thumb_url
         if not cover_url and is_spotify_id(track.id):
             # В выгрузках (/import) обложек обычно нет
@@ -299,4 +317,5 @@ class Downloader:
             duration=round(MP3(path).info.length),
             source_url=candidate.url,
             thumbnail=thumbnail,
+            track=track,
         )
