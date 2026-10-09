@@ -25,6 +25,7 @@ from .importer import ImportFormatError, parse_library_file
 from .keyboards import PAGE_SIZE, PageCallback, TrackCallback, total_pages, tracks_keyboard
 from .library import Library, NoLibraryError
 from .query import track_from_query
+from .runtime import AccessControl
 from .sender import TrackSender, TrackTooLargeError
 from .spotify import AuthorizationError, SpotifyService, Track
 from .storage import Storage
@@ -107,8 +108,10 @@ def _failure_text(error: Exception) -> str:
     return 'ошибка при скачивании'
 
 
-def _help_text(settings: Settings, status: str) -> str:
+def _help_text(settings: Settings, status: str, is_admin: bool) -> str:
     login = '/login, /logout — подключить или отключить Spotify\n' if settings.spotify_enabled else ''
+    if is_admin:
+        login += '/admin — настройки бота и доступ (только для вас)\n'
     return (
         '🎧 <b>Spotify → SoundCloud</b>\n\n'
         'Беру ваши любимые треки из Spotify, нахожу их на SoundCloud и присылаю mp3 '
@@ -130,7 +133,7 @@ def _help_text(settings: Settings, status: str) -> str:
 @router.message(CommandStart())
 @router.message(Command('help'))
 async def cmd_help(
-    message: Message, settings: Settings, spotify: SpotifyService | None, library: Library
+    message: Message, settings: Settings, spotify: SpotifyService | None, library: Library, access: AccessControl
 ) -> None:
     user_id = message.from_user.id
     imported = library.imported_count(user_id)
@@ -142,7 +145,7 @@ async def cmd_help(
         status = '🔑 Библиотека не подключена — начните с /login или /import'
     else:
         status = '📭 Библиотека не загружена — начните с /import'
-    await message.answer(_help_text(settings, status))
+    await message.answer(_help_text(settings, status, access.is_admin(user_id)))
 
 
 @router.message(Command('login'))

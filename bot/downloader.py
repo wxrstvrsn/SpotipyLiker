@@ -238,7 +238,7 @@ class Downloader:
             ))
         return candidates
 
-    def _download_candidate(self, track: Track, candidate: Candidate) -> Path:
+    def _download_candidate(self, track: Track, candidate: Candidate, quality: int) -> Path:
         opts = {
             **self._base_opts(),
             # SoundCloud отдаёт для Go+ треков только 30-секундное превью — такие форматы пропускаем
@@ -248,7 +248,7 @@ class Downloader:
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': str(self._quality),
+                'preferredquality': str(quality),
             }],
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -262,7 +262,8 @@ class Downloader:
         for leftover in self._dir.glob(f'{track.id}.*'):
             leftover.unlink(missing_ok=True)
 
-    def download(self, track: Track) -> DownloadResult:
+    def download(self, track: Track, quality: int | None = None) -> DownloadResult:
+        quality = quality or self._quality
         query = build_query(track)
         search_errors = []
         for source in self._sources:
@@ -277,7 +278,7 @@ class Downloader:
             for candidate in candidates[:MAX_ATTEMPTS_PER_SOURCE]:
                 log.info('Скачиваю %s -> %s', track.display_name, candidate.url)
                 try:
-                    path = self._download_candidate(track, candidate)
+                    path = self._download_candidate(track, candidate, quality)
                 except yt_dlp.utils.DownloadError as e:
                     log.warning('Не удалось скачать %s: %s', candidate.url, e)
                     self._cleanup(track)

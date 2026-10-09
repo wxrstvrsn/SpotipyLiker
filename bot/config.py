@@ -30,7 +30,7 @@ def _int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def _user_ids(raw: str) -> frozenset[int]:
+def _user_ids(raw: str, name: str = 'ALLOWED_USER_IDS') -> frozenset[int]:
     ids = set()
     for part in raw.replace(';', ',').split(','):
         part = part.strip()
@@ -39,7 +39,7 @@ def _user_ids(raw: str) -> frozenset[int]:
         try:
             ids.add(int(part))
         except ValueError:
-            raise ConfigError(f'ALLOWED_USER_IDS: некорректный id {part!r}') from None
+            raise ConfigError(f'{name}: некорректный id {part!r}') from None
     return frozenset(ids)
 
 
@@ -61,6 +61,8 @@ class Settings:
     spotify_client_secret: str | None
     spotify_redirect_uri: str
     allowed_user_ids: frozenset[int]
+    # Админы: всегда имеют доступ, управляют пользователями и настройками через /admin
+    admin_user_ids: frozenset[int]
     data_dir: Path
     last_tracks_default: int
     last_tracks_max: int
@@ -97,6 +99,7 @@ class Settings:
             spotify_client_secret=client_secret,
             spotify_redirect_uri=os.getenv('SPOTIFY_REDIRECT_URI', '').strip() or DEFAULT_REDIRECT_URI,
             allowed_user_ids=_user_ids(os.getenv('ALLOWED_USER_IDS', '')),
+            admin_user_ids=_user_ids(os.getenv('ADMIN_USER_IDS', ''), 'ADMIN_USER_IDS'),
             data_dir=Path(os.getenv('DATA_DIR', '').strip() or 'data').resolve(),
             last_tracks_default=min(_int('LAST_TRACKS_DEFAULT', 10), last_max),
             last_tracks_max=last_max,

@@ -13,11 +13,12 @@ def test_storage_tracks_and_file_ids(tmp_path, track):
     assert storage.get_track(track.id) == track
     assert storage.get_track('missing') is None
 
-    assert storage.get_file_id(track.id) is None
-    storage.set_file_id(track.id, 'FILE')
-    assert storage.get_file_id(track.id) == 'FILE'
-    storage.delete_file_id(track.id)
-    assert storage.get_file_id(track.id) is None
+    assert storage.get_file_id(track.id, 192) is None
+    storage.set_file_id(track.id, 192, 'FILE')
+    assert storage.get_file_id(track.id, 192) == 'FILE'
+    assert storage.get_file_id(track.id, 320) is None  # кэш свой для каждого битрейта
+    storage.delete_file_id(track.id, 192)
+    assert storage.get_file_id(track.id, 192) is None
     storage.close()
 
     # данные переживают перезапуск
