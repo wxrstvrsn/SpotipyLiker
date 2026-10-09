@@ -36,7 +36,7 @@ from aiogram.types import (
 )
 
 from bot.__main__ import build_dispatcher
-from bot.admin import AccessRequestCallback, AdminCallback
+from bot.admin import AccessRequestCallback, AdminCallback, SettingCallback, SettingRequestCallback
 from bot.config import Settings
 from bot.downloader import DownloadResult, TrackNotFoundError
 from bot.keyboards import PageCallback, TrackCallback
@@ -640,3 +640,100 @@ async def test_users_screen_and_picker(env):
     assert 'уже есть доступ' in reply.text
     assert isinstance(reply.reply_markup, ReplyKeyboardRemove)
     assert [u.name for u in env.storage.allowed_users()] == ['Ann Lee']
+
+
+async def test_revoked_user_can_request_access_again(env):
+    stranger = 999
+    await feed(env, message_update('hi', user_id=stranger))
+    await feed(env, callback_update(AccessRequestCallback(allow=True, user_id=stranger).pack(), user_id=ADMIN_ID))
+    await feed(env, message_update(f'/deny {stranger}', user_id=ADMIN_ID))
+    assert not env.storage.is_allowed_user(stranger)
+
+    env.session.requests.clear()
+    await feed(env, message_update('hi again', user_id=stranger))
+    to_admin, to_user = env.session.of(SendMessage)
+    assert to_admin.chat_id == ADMIN_ID and 'Запрос доступа' in to_admin.text
+    assert 'отправил администратору запрос' in to_user.text
+
+
+async def test_declined_user_is_not_spamming_admin(env):
+    stranger = 999
+    await feed(env, message_update('hi', user_id=stranger))
+    await feed(env, callback_update(AccessRequestCallback(allow=False, user_id=stranger).pack(), user_id=ADMIN_ID))
+    assert any(m.chat_id == stranger and 'отклонил' in m.text for m in env.session.of(SendMessage))
+
+    env.session.requests.clear()
+    await feed(env, message_update('please', user_id=stranger))
+    (reply,) = env.session.of(SendMessage)
+    assert reply.chat_id == stranger and 'отклонил' in reply.text
+
+    # админ может передумать
+    await feed(env, message_update(f'/allow {stranger}', user_id=ADMIN_ID))
+    await feed(env, message_update('/tracks', user_id=stranger))
+    assert 'Любимые треки' in texts(env)[-1]
+
+
+async def test_user_requests_quality_change(env):
+    await feed(env, message_update('/settings'))
+    menu = env.session.of(SendMessage)[-1]
+    assert 'выберите новое значение' in menu.text.lower()
+
+    await feed(env, callback_update(menu.reply_markup.inline_keyboard[0][0].callback_data))
+    choices = env.session.of(EditMessageText)[-1]
+    assert 'после одобрения администратором' in choices.text
+    pick_320 = choices.reply_markup.inline_keyboard[0][3]
+    assert pick_320.text == '320 kbps'
+
+    env.session.requests.clear()
+    await feed(env, callback_update(pick_320.callback_data))
+    (request,) = env.session.of(SendMessage)
+    assert request.chat_id == ADMIN_ID
+    assert '192 kbps → <b>320 kbps</b>' in request.text
+    approve, decline = request.reply_markup.inline_keyboard[0]
+    assert 'Запрос отправлен' in texts(env, EditMessageText)[-1]
+    assert env.runtime.audio_quality == 192
+
+    # повторный такой же запрос не дёргает админа, текущее значение — тоже
+    env.session.requests.clear()
+    await feed(env, callback_update(pick_320.callback_data))
+    await feed(env, callback_update(SettingCallback(action='pick', key='audio_quality', value='192').pack()))
+    assert not env.session.of(SendMessage)
+    assert 'уже отправлен' in env.session.of(AnswerCallbackQuery)[0].text
+    assert 'Уже стоит' in env.session.of(AnswerCallbackQuery)[1].text
+
+    # пользователь не может одобрить сам себе
+    await feed(env, callback_update(approve.callback_data))
+    assert env.runtime.audio_quality == 192
+
+    env.session.requests.clear()
+    await feed(env, callback_update(approve.callback_data, user_id=ADMIN_ID))
+    assert env.runtime.audio_quality == 320
+    (notice,) = env.session.of(SendMessage)
+    assert notice.chat_id == USER_ID and 'одобрил' in notice.text
+    assert 'Применено' in texts(env, EditMessageText)[-1]
+
+    # отклонённый запрос ничего не меняет
+    env.session.requests.clear()
+    await feed(env, callback_update(SettingCallback(action='pick', key='audio_quality', value='128').pack()))
+    decline_128 = SettingRequestCallback(allow=False, user_id=USER_ID, key='audio_quality', value='128').pack()
+    await feed(env, callback_update(decline_128, user_id=ADMIN_ID))
+    assert env.runtime.audio_quality == 320
+    assert 'отклонил' in env.session.of(SendMessage)[-1].text
+
+
+async def test_admin_changes_setting_directly_from_settings(env):
+    await feed(env, callback_update(SettingCallback(action='pick', key='audio_quality', value='256').pack(),
+                                    user_id=ADMIN_ID))
+    assert env.runtime.audio_quality == 256
+    assert not env.session.of(SendMessage)
+
+
+async def test_settings_request_without_admins(tmp_path, settings):
+    env = _make_env(tmp_path, dataclasses.replace(settings, admin_user_ids=frozenset()), FakeSpotify(TRACKS))
+    try:
+        await feed(env, callback_update(SettingCallback(action='pick', key='audio_quality', value='320').pack()))
+        (answer,) = env.session.of(AnswerCallbackQuery)
+        assert answer.show_alert and 'не назначен' in answer.text
+        assert env.runtime.audio_quality == 192
+    finally:
+        _close_env(env)

@@ -19,13 +19,20 @@ from aiogram.types import (
 from aiogram.utils.chat_action import ChatActionSender
 from spotipy import SpotifyException
 
+from .admin import (
+    SettingCallback,
+    notify_setting_request,
+    setting_option_view,
+    settings_view,
+    show_view,
+)
 from .config import Settings
 from .downloader import TrackNotFoundError
 from .importer import ImportFormatError, parse_library_file
 from .keyboards import PAGE_SIZE, PageCallback, TrackCallback, total_pages, tracks_keyboard
 from .library import Library, NoLibraryError
 from .query import track_from_query
-from .runtime import AccessControl
+from .runtime import OPTIONS, AccessControl, RuntimeSettings
 from .sender import TrackSender, TrackTooLargeError
 from .spotify import AuthorizationError, SpotifyService, Track
 from .storage import Storage
@@ -43,6 +50,7 @@ def bot_commands(spotify_enabled: bool) -> list[BotCommand]:
         BotCommand(command='last', description='Скачать N последних добавленных треков'),
         BotCommand(command='import', description='Загрузить выгрузку библиотеки без Spotify API'),
         BotCommand(command='forget', description='Удалить загруженную выгрузку'),
+        BotCommand(command='settings', description='Качество mp3 (смена — через админа)'),
     ]
     if spotify_enabled:
         commands += [
@@ -121,6 +129,7 @@ def _help_text(settings: Settings, status: str, is_admin: bool) -> str:
         f'(по умолчанию {settings.last_tracks_default}, максимум {settings.last_tracks_max})\n'
         '/import — загрузить выгрузку библиотеки (работает без Spotify API)\n'
         '/forget — удалить загруженную выгрузку\n'
+        '/settings — качество mp3 (изменение одобряет администратор)\n'
         f'{login}\n'
         '🔎 Или просто напишите <code>Исполнитель - Название</code> — найду и пришлю трек. '
         'Можно несколько строк, по треку на строку.\n\n'
@@ -427,6 +436,56 @@ async def cmd_forget(message: Message, db: Storage, library: Library) -> None:
         'Загрузить новую: /import'
     )
     await message.answer(f'🗑 Выгрузка удалена. {next_step}')
+
+
+# --- /settings: смена общих настроек через одобрение админа ---
+
+@router.message(Command('settings'))
+async def cmd_settings(message: Message, runtime: RuntimeSettings, access: AccessControl) -> None:
+    text, markup = settings_view(runtime, access.is_admin(message.from_user.id))
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(SettingCallback.filter())
+async def on_setting(
+    callback: CallbackQuery, callback_data: SettingCallback, bot: Bot, runtime: RuntimeSettings, access: AccessControl
+) -> None:
+    user = callback.from_user
+    is_admin = access.is_admin(user.id)
+    option = OPTIONS.get(callback_data.key)
+    if callback_data.action == 'option' and option:
+        await show_view(callback, setting_option_view(runtime, option.key, is_admin))
+        await callback.answer()
+        return
+    if callback_data.action != 'pick' or not option or callback_data.value not in option.choices:
+        await show_view(callback, settings_view(runtime, is_admin))
+        await callback.answer()
+        return
+
+    value, current = callback_data.value, runtime.get(option.key)
+    change = f'{option.title}: {option.label(current)} → {option.label(value)}'
+    if value == current:
+        await callback.answer(f'Уже стоит {option.label(value)}')
+        return
+    if is_admin:
+        runtime.set(option.key, value)
+        await callback.answer(f'✅ {option.title}: {option.label(value)}')
+        await show_view(callback, settings_view(runtime, is_admin))
+        return
+    if not access.admins:
+        await callback.answer('Администратор не назначен — менять настройки некому.', show_alert=True)
+        return
+    if not runtime.register_request(user.id, option.key, value):
+        await callback.answer('Такой запрос уже отправлен, ждём ответа администратора.', show_alert=True)
+        return
+    await notify_setting_request(bot, access.admins, user, option.key, current, value)
+    await callback.answer('📨 Запрос отправлен администратору')
+    await show_view(callback, (
+        f'📨 Запрос отправлен администратору:\n{change}\n\nЯ напишу, когда он ответит.',
+        InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text='⬅️ К настройкам', callback_data=SettingCallback(action='menu').pack()),
+        ]]),
+    ))
 
 
 # --- Поиск по тексту: «Исполнитель - Название» ---

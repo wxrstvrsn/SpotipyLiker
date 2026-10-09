@@ -16,13 +16,12 @@ DENIED_TEXT = '⛔ Этот бот приватный.'
 class AccessMiddleware(BaseMiddleware):
     """Пропускает только пользователей с доступом (см. AccessControl).
 
-    Остальным отвечает отказом, а админам один раз присылает запрос доступа с кнопками.
+    Остальным отвечает отказом, а админам присылает запрос доступа с кнопками — один раз,
+    пока админ на него не ответит.
     """
 
     def __init__(self, access: AccessControl):
         self._access = access
-        # Кому уже отправили запрос админам (до перезапуска бота), чтобы не спамить
-        self._requested: set[int] = set()
 
     async def __call__(
         self,
@@ -44,8 +43,10 @@ class AccessMiddleware(BaseMiddleware):
     async def _denied_text(self, bot: Bot, user: User) -> str:
         if not self._access.admins:
             return f'{DENIED_TEXT}\nВаш Telegram ID: <code>{user.id}</code>'
-        if user.id in self._requested:
+        state = self._access.register_request(user.id)
+        if state == 'pending':
             return f'{DENIED_TEXT}\nЗапрос на доступ уже отправлен администратору.'
-        self._requested.add(user.id)
+        if state == 'declined':
+            return f'{DENIED_TEXT}\nАдминистратор отклонил запрос на доступ.'
         await notify_access_request(bot, self._access.admins, user)
         return f'{DENIED_TEXT}\nЯ отправил администратору запрос на доступ — когда он его одобрит, я напишу.'

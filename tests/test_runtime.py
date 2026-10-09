@@ -81,3 +81,24 @@ def test_settings_admin_ids(monkeypatch):
     monkeypatch.delenv('SPOTIFY_CLIENT_ID', raising=False)
     monkeypatch.delenv('SPOTIFY_CLIENT_SECRET', raising=False)
     assert Settings.from_env().admin_user_ids == {883905237}
+
+
+def test_access_request_states(tmp_path, db):
+    access = AccessControl(make_settings(tmp_path, admin_user_ids=frozenset({1})), db)
+    assert access.register_request(5) == 'new'
+    assert access.register_request(5) == 'pending'
+    access.decline_request(5)
+    assert access.register_request(5) == 'declined'
+    # выдача или закрытие доступа сбрасывают историю запросов
+    access.allow(5, None, 1)
+    access.revoke(5)
+    assert access.register_request(5) == 'new'
+
+
+def test_setting_requests_dedupe(tmp_path, db):
+    runtime = RuntimeSettings(make_settings(tmp_path), db)
+    assert runtime.register_request(5, 'audio_quality', '320')
+    assert not runtime.register_request(5, 'audio_quality', '320')
+    assert runtime.register_request(5, 'audio_quality', '256')  # передумал — новый запрос
+    runtime.resolve_request(5, 'audio_quality')
+    assert runtime.register_request(5, 'audio_quality', '256')

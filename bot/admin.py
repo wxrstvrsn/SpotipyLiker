@@ -1,7 +1,8 @@
-"""Админка: /admin (настройки и доступ), /allow, /deny, запросы доступа от новых пользователей."""
+"""Админка: /admin (настройки и доступ), /allow, /deny, запросы доступа и запросы на смену настроек."""
 
 import contextlib
 import logging
+from collections.abc import Callable
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -57,6 +58,23 @@ class AccessRequestCallback(CallbackData, prefix='req'):
     user_id: int
 
 
+class SettingCallback(CallbackData, prefix='set'):
+    """Меню /settings для всех пользователей. action: menu | option | pick."""
+
+    action: str
+    key: str = ''
+    value: str = ''
+
+
+class SettingRequestCallback(CallbackData, prefix='sreq'):
+    """Ответ админа на запрос пользователя изменить настройку."""
+
+    allow: bool
+    user_id: int
+    key: str
+    value: str
+
+
 def _user_label(user_id: int, name: str | None) -> str:
     return f'{escape(name)} (<code>{user_id}</code>)' if name else f'<code>{user_id}</code>'
 
@@ -83,22 +101,86 @@ def panel_view(runtime: RuntimeSettings, access: AccessControl) -> tuple[str, In
     return '\n'.join(lines), builder.as_markup()
 
 
-def option_view(runtime: RuntimeSettings, key: str) -> tuple[str, InlineKeyboardMarkup]:
+def _choices_view(
+    runtime: RuntimeSettings, key: str, pick: Callable[[str], CallbackData], back: CallbackData, note: str = ''
+) -> tuple[str, InlineKeyboardMarkup]:
     option = OPTIONS[key]
     current = runtime.get(key)
     text = f'{option.title}\nСейчас: <b>{option.label(current)}</b>'
     if option.hint:
         text += f'\n\n<i>{escape(option.hint)}</i>'
+    if note:
+        text += f'\n\n{note}'
     builder = InlineKeyboardBuilder()
     builder.row(*(
         InlineKeyboardButton(
             text=('✓ ' if choice == current else '') + option.label(choice),
-            callback_data=AdminCallback(action='set', key=key, value=choice).pack(),
+            callback_data=pick(choice).pack(),
         )
         for choice in option.choices
     ))
-    builder.row(InlineKeyboardButton(text='⬅️ Назад', callback_data=AdminCallback(action='menu').pack()))
+    builder.row(InlineKeyboardButton(text='⬅️ Назад', callback_data=back.pack()))
     return text, builder.as_markup()
+
+
+def option_view(runtime: RuntimeSettings, key: str) -> tuple[str, InlineKeyboardMarkup]:
+    return _choices_view(
+        runtime, key,
+        pick=lambda choice: AdminCallback(action='set', key=key, value=choice),
+        back=AdminCallback(action='menu'),
+    )
+
+
+# --- /settings: настройки для всех, изменение — через одобрение админа ---
+
+def settings_view(runtime: RuntimeSettings, is_admin: bool) -> tuple[str, InlineKeyboardMarkup]:
+    lines = ['⚙️ <b>Настройки бота</b>', '']
+    builder = InlineKeyboardBuilder()
+    for option in OPTIONS.values():
+        value = option.label(runtime.get(option.key))
+        lines.append(f'{option.title}: <b>{value}</b>')
+        builder.row(InlineKeyboardButton(
+            text=f'{option.title}: {value}',
+            callback_data=SettingCallback(action='option', key=option.key).pack(),
+        ))
+    if not is_admin:
+        lines.append('\nНастройки общие для всех. Выберите новое значение — я отправлю запрос администратору.')
+    return '\n'.join(lines), builder.as_markup()
+
+
+def setting_option_view(runtime: RuntimeSettings, key: str, is_admin: bool) -> tuple[str, InlineKeyboardMarkup]:
+    return _choices_view(
+        runtime, key,
+        pick=lambda choice: SettingCallback(action='pick', key=key, value=choice),
+        back=SettingCallback(action='menu'),
+        note='' if is_admin else 'Изменение вступит в силу после одобрения администратором.',
+    )
+
+
+async def notify_setting_request(
+    bot: Bot, admins: frozenset[int], user: User, key: str, current: str, value: str
+) -> None:
+    option = OPTIONS[key]
+    text = (
+        '🔔 <b>Запрос на изменение настройки</b>\n'
+        f'От: {escape(_full_name(user))} (<code>{user.id}</code>)\n'
+        f'{option.title}: {option.label(current)} → <b>{option.label(value)}</b>'
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text='✅ Применить',
+            callback_data=SettingRequestCallback(allow=True, user_id=user.id, key=key, value=value).pack(),
+        ),
+        InlineKeyboardButton(
+            text='🚫 Отклонить',
+            callback_data=SettingRequestCallback(allow=False, user_id=user.id, key=key, value=value).pack(),
+        ),
+    ]])
+    for admin_id in admins:
+        try:
+            await bot.send_message(admin_id, text, reply_markup=markup)
+        except TelegramAPIError as e:
+            log.warning('Не удалось отправить админу %s запрос на изменение настройки: %s', admin_id, e)
 
 
 def users_view(access: AccessControl) -> tuple[str, InlineKeyboardMarkup]:
@@ -123,7 +205,7 @@ def users_view(access: AccessControl) -> tuple[str, InlineKeyboardMarkup]:
     return '\n'.join(lines), builder.as_markup()
 
 
-async def _show(callback: CallbackQuery, view: tuple[str, InlineKeyboardMarkup]) -> None:
+async def show_view(callback: CallbackQuery, view: tuple[str, InlineKeyboardMarkup]) -> None:
     text, markup = view
     if isinstance(callback.message, Message):
         try:
@@ -231,7 +313,7 @@ async def on_admin_button(
 ) -> None:
     action = callback_data.action
     if action == 'option' and callback_data.key in OPTIONS:
-        await _show(callback, option_view(runtime, callback_data.key))
+        await show_view(callback, option_view(runtime, callback_data.key))
     elif action == 'set' and callback_data.key in OPTIONS:
         try:
             runtime.set(callback_data.key, callback_data.value)
@@ -240,14 +322,14 @@ async def on_admin_button(
             return
         option = OPTIONS[callback_data.key]
         await callback.answer(f'✅ {option.title}: {option.label(callback_data.value)}')
-        await _show(callback, panel_view(runtime, access))
+        await show_view(callback, panel_view(runtime, access))
         return
     elif action == 'users':
-        await _show(callback, users_view(access))
+        await show_view(callback, users_view(access))
     elif action == 'remove':
         removed = access.revoke(int(callback_data.value))
         await callback.answer('🚫 Доступ закрыт' if removed else 'Уже удалён')
-        await _show(callback, users_view(access))
+        await show_view(callback, users_view(access))
         return
     elif action == 'add':
         await callback.bot.send_message(
@@ -270,7 +352,7 @@ async def on_admin_button(
             ),
         )
     else:
-        await _show(callback, panel_view(runtime, access))
+        await show_view(callback, panel_view(runtime, access))
     await callback.answer()
 
 
@@ -305,8 +387,34 @@ async def on_access_request(
         await _notify_granted(bot, user_id)
         result = f'✅ Доступ открыт: {_user_label(user_id, name)}'
     else:
+        access.decline_request(user_id)
+        with contextlib.suppress(TelegramAPIError):
+            await bot.send_message(user_id, '🚫 Администратор отклонил запрос на доступ к боту.')
         result = f'🚫 Запрос отклонён: {_user_label(user_id, name)}'
     if isinstance(callback.message, Message):
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(result)
     await callback.answer()
+
+
+@router.callback_query(SettingRequestCallback.filter())
+async def on_setting_request(
+    callback: CallbackQuery, callback_data: SettingRequestCallback, bot: Bot, runtime: RuntimeSettings
+) -> None:
+    option = OPTIONS.get(callback_data.key)
+    if option is None or callback_data.value not in option.choices:
+        await callback.answer('Такой настройки больше нет', show_alert=True)
+        return
+    runtime.resolve_request(callback_data.user_id, callback_data.key)
+    change = f'{option.title} → {option.label(callback_data.value)}'
+    if callback_data.allow:
+        runtime.set(callback_data.key, callback_data.value)
+        result, to_user = f'✅ Применено: {change}', f'✅ Администратор одобрил запрос: {change}'
+    else:
+        result, to_user = f'🚫 Отклонено: {change}', f'🚫 Администратор отклонил запрос: {change}'
+    with contextlib.suppress(TelegramAPIError):
+        await bot.send_message(callback_data.user_id, to_user)
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(f'{callback.message.html_text}\n\n{result}')
+    await callback.answer(result)
